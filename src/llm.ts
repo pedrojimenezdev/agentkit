@@ -6,6 +6,10 @@
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
+  /** On assistant messages: the tool calls the model issued. */
+  toolCalls?: ToolCallResult[];
+  /** On tool messages: which assistant tool call this answers. */
+  toolCallId?: string;
 }
 
 export interface ToolCallRequest {
@@ -48,9 +52,29 @@ export function createOpenAICompatible(opts: {
 }): LLM {
   return {
     async complete(messages, o) {
+      // Serialize into the OpenAI-compatible wire format: assistant messages
+      // carry `tool_calls`, tool messages carry `tool_call_id`. Dropping the
+      // ids is what makes real providers reject the turn.
+      const wire = messages.map((m) => {
+        if (m.role === "assistant" && m.toolCalls?.length) {
+          return {
+            role: "assistant",
+            content: m.content || null,
+            tool_calls: m.toolCalls.map((tc) => ({
+              id: tc.id,
+              type: "function",
+              function: { name: tc.name, arguments: tc.arguments },
+            })),
+          };
+        }
+        if (m.role === "tool") {
+          return { role: "tool", tool_call_id: m.toolCallId ?? "", content: m.content };
+        }
+        return { role: m.role, content: m.content };
+      });
       const body: Record<string, unknown> = {
         model: opts.model,
-        messages,
+        messages: wire,
         temperature: o?.temperature ?? 0.2,
         max_tokens: o?.maxTokens ?? 1024,
       };

@@ -37,7 +37,7 @@ export async function agent(opts: AgentOptions): Promise<string> {
     });
     opts.budget?.record(reply.usage ?? { input: 0, output: 0 });
 
-    messages.push({ role: "assistant", content: reply.text });
+    messages.push({ role: "assistant", content: reply.text, toolCalls: reply.toolCalls });
     opts.onStep?.({ step, messages, reply });
     if (opts.onStep?.({ step, messages, reply }) === true) break;
 
@@ -50,7 +50,7 @@ export async function agent(opts: AgentOptions): Promise<string> {
       const outcome = await executeTool(opts.tools ?? ([] as Tool<any, unknown>[]), tc.name, tc.arguments);
       messages.push({
         role: "tool",
-        // Match the tool-call id when a provider wants one; plain text otherwise.
+        toolCallId: tc.id,
         content: JSON.stringify({ ok: outcome.ok, result: outcome.result }),
       });
     }
