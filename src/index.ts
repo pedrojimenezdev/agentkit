@@ -3,8 +3,8 @@ export type { LLM, LLMReply, ChatMessage, ToolCallResult } from "./llm.ts";
 
 export { structured, extractJson } from "./structured.ts";
 
-export { defineTool, executeTool, parseToolArguments, toolSchema } from "./tools.ts";
-export type { Tool } from "./tools.ts";
+export { defineTool, executeTool, parseToolArguments, parseToolArgumentsResult, toolSchema } from "./tools.ts";
+export type { Tool, ToolArgumentsParse } from "./tools.ts";
 
 export { agent } from "./agent.ts";
 export type { AgentOptions } from "./agent.ts";

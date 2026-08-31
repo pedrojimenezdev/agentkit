@@ -41,30 +41,46 @@ export function inMemoryStore(): VectorStore {
 }
 
 /** Deterministic, size-capped chunker. Never splits mid-sentence when it can
- *  help it — keeps each chunk self-contained for retrieval quality. */
+ *  help it — keeps each chunk self-contained for retrieval quality.
+ *
+ *  `size` caps the *new* content in each chunk; `overlap` then prefixes every
+ *  chunk after the first with the tail of its predecessor, so a fact straddling
+ *  a boundary is retrievable from either side. A sentence longer than `size` is
+ *  hard-split rather than truncated — chunking never drops content. */
 export function chunk(text: string, opts?: { size?: number; overlap?: number }): string[] {
-  const size = opts?.size ?? 400;
-  const overlap = opts?.overlap ?? 40;
-  const sentences = text.split(/(?<=[.!?])\s+/);
+  const size = Math.max(1, opts?.size ?? 400);
+  const overlap = Math.max(0, Math.min(opts?.overlap ?? 40, size - 1));
+  const sentences = text.split(/(?<=[.!?])\s+/).filter((s) => s.trim().length > 0);
   const out: string[] = [];
   let cur = "";
+  const flush = () => {
+    if (cur.trim().length > 0) out.push(cur.trim());
+    cur = "";
+  };
+
   for (const s of sentences) {
-    if ((cur + " " + s).trim().length <= size) {
-      cur = (cur + " " + s).trim();
-    } else {
-      if (cur) out.push(cur);
-      cur = s.length > size ? s.slice(0, size) : s;
+    const candidate = cur ? `${cur} ${s}` : s;
+    if (candidate.length <= size) {
+      cur = candidate;
+      continue;
+    }
+    flush();
+    let rest = s;
+    while (rest.length > size) {
+      out.push(rest.slice(0, size));
+      rest = rest.slice(size);
+    }
+    cur = rest;
+  }
+  flush();
+
+  if (overlap > 0 && out.length > 1) {
+    const base = [...out];
+    for (let i = 1; i < out.length; i++) {
+      out[i] = `${base[i - 1].slice(-overlap)} ${base[i]}`;
     }
   }
-  if (cur) {
-    out.push(cur.length > size ? cur.slice(0, size) : cur);
-    // overlap tail
-    out[out.length - 1] = out[out.length - 1].slice(0, size);
-    if (out.length > 1 && overlap > 0) {
-      out[out.length - 1] = out[out.length - 2].slice(-overlap) + " " + out[out.length - 1];
-    }
-  }
-  return out.filter((s) => s.trim().length > 0);
+  return out;
 }
 
 export interface RAGOptions {

@@ -10,6 +10,28 @@ test("chunk splits deterministically without dropping content", () => {
   assert.ok(parts.join(" ").includes("Sentence one"));
 });
 
+test("chunk overlaps every boundary, not just the last", () => {
+  const text = "Alpha one here. Bravo two here. Charlie three here. Delta four here.";
+  const parts = chunk(text, { size: 32, overlap: 8 });
+  assert.ok(parts.length >= 3, `expected 3+ chunks, got ${parts.length}`);
+  // Each chunk after the first carries the tail of its predecessor.
+  for (let i = 1; i < parts.length; i++) {
+    const tail = parts[i - 1].slice(-8);
+    assert.ok(parts[i].startsWith(tail), `chunk ${i} does not overlap chunk ${i - 1}`);
+  }
+});
+
+test("chunk hard-splits an oversized sentence instead of dropping content", () => {
+  const long = "x".repeat(250) + ".";
+  const parts = chunk(long, { size: 100, overlap: 0 });
+  assert.equal(parts.join(""), long);
+});
+
+test("chunk with zero overlap leaves chunks untouched", () => {
+  const parts = chunk("One here. Two here. Three here.", { size: 12, overlap: 0 });
+  assert.deepEqual(parts, ["One here.", "Two here.", "Three here."]);
+});
+
 test("inMemoryStore isolates by scope and ranks by similarity", async () => {
   const store = inMemoryStore();
   await store.add({ id: "a", scope: "tenant-1", embedding: [1, 0], text: "alpha" });

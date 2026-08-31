@@ -38,7 +38,6 @@ export async function agent(opts: AgentOptions): Promise<string> {
     opts.budget?.record(reply.usage ?? { input: 0, output: 0 });
 
     messages.push({ role: "assistant", content: reply.text, toolCalls: reply.toolCalls });
-    opts.onStep?.({ step, messages, reply });
     if (opts.onStep?.({ step, messages, reply }) === true) break;
 
     if (!reply.toolCalls?.length) {

@@ -113,20 +113,102 @@ export function createOpenAICompatible(opts: {
   };
 }
 
+interface AnthropicBlock {
+  type: string;
+  text?: string;
+  id?: string;
+  name?: string;
+  input?: unknown;
+  /** On tool_result blocks: which tool_use block this answers. */
+  tool_use_id?: string;
+  /** On tool_result blocks: the serialized tool outcome. */
+  content?: string;
+}
+
+interface AnthropicMessage {
+  role: "user" | "assistant";
+  content: string | AnthropicBlock[];
+}
+
+/** Anthropic takes tool arguments as a JSON *object*, not the JSON string the
+ *  OpenAI wire format uses. A misshapen string becomes `{}` rather than a
+ *  request the API will reject outright. */
+function toolInput(rawArguments: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(rawArguments || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Translate the shared ChatMessage history into Anthropic's block format:
+ *  assistant tool calls become `tool_use` blocks, and tool results become
+ *  `tool_result` blocks on a user turn. Dropping either half is what makes the
+ *  API reject the next turn with "unexpected tool_use id". */
+export function toAnthropicMessages(messages: ChatMessage[]): AnthropicMessage[] {
+  const out: AnthropicMessage[] = [];
+  for (const m of messages) {
+    if (m.role === "system") continue;
+
+    if (m.role === "tool") {
+      const block: AnthropicBlock = {
+        type: "tool_result",
+        tool_use_id: m.toolCallId ?? "",
+        content: m.content,
+      };
+      // Every tool_result answering one assistant turn must ride in a single
+      // user message, so append to the block list already being built.
+      const prev = out[out.length - 1];
+      if (prev && prev.role === "user" && Array.isArray(prev.content)) {
+        prev.content.push(block);
+      } else {
+        out.push({ role: "user", content: [block] });
+      }
+      continue;
+    }
+
+    if (m.role === "assistant" && m.toolCalls?.length) {
+      const content: AnthropicBlock[] = [];
+      if (m.content) content.push({ type: "text", text: m.content });
+      for (const tc of m.toolCalls) {
+        content.push({ type: "tool_use", id: tc.id, name: tc.name, input: toolInput(tc.arguments) });
+      }
+      out.push({ role: "assistant", content });
+      continue;
+    }
+
+    // Anthropic rejects empty-string content, so skip a contentless turn.
+    if (!m.content) continue;
+    out.push({ role: m.role as "user" | "assistant", content: m.content });
+  }
+  return out;
+}
+
+function anthropicToolCalls(content: AnthropicBlock[]): ToolCallResult[] | undefined {
+  const uses = content.filter((c) => c.type === "tool_use");
+  if (!uses.length) return undefined;
+  return uses.map((c) => ({
+    id: c.id ?? "",
+    name: c.name ?? "",
+    arguments: JSON.stringify(c.input ?? {}),
+  }));
+}
+
 /** Fetch client for the Anthropic Messages API. */
 export function createAnthropic(opts: { apiKey: string; model: string }): LLM {
   return {
     async complete(messages, o) {
       const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n");
-      const rest = messages.filter((m) => m.role !== "system");
       const body: Record<string, unknown> = {
         model: opts.model,
         max_tokens: o?.maxTokens ?? 1024,
         system: system || undefined,
-        messages: rest
-          .filter((m) => m.role !== "tool")
-          .map((m) => ({ role: m.role, content: m.content })),
+        messages: toAnthropicMessages(messages),
       };
+      if (o?.temperature !== undefined) body.temperature = o.temperature;
       if (o?.tools?.length) {
         body.tools = o.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters }));
       }
@@ -140,11 +222,13 @@ export function createAnthropic(opts: { apiKey: string; model: string }): LLM {
         throw new Error(`Anthropic HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
       }
       const data = (await res.json()) as {
-        content: { type: string; text?: string }[];
+        content: AnthropicBlock[];
         usage?: { input_tokens: number; output_tokens: number };
       };
+      const content = data.content ?? [];
       return {
-        text: data.content.filter((c) => c.type === "text").map((c) => c.text ?? "").join(""),
+        text: content.filter((c) => c.type === "text").map((c) => c.text ?? "").join(""),
+        toolCalls: anthropicToolCalls(content),
         usage: data.usage
           ? { input: data.usage.input_tokens, output: data.usage.output_tokens }
           : undefined,

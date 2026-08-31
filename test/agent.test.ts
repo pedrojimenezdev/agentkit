@@ -76,6 +76,65 @@ test("budget stops a runaway agent", async () => {
   );
 });
 
+test("onStep fires exactly once per step", async () => {
+  const llm = scriptedLLM([
+    { text: "", toolCalls: [{ id: "1", name: "noop", arguments: "{}" }] as ToolCallResult[], usage: { input: 1, output: 1 } },
+    { text: "done", usage: { input: 1, output: 1 } },
+  ]);
+  const seen: number[] = [];
+  await agent({
+    llm,
+    tools: [],
+    system: "s",
+    maxSteps: 4,
+    onStep: ({ step }) => {
+      seen.push(step);
+    },
+  });
+  assert.deepEqual(seen, [0, 1]);
+});
+
+test("onStep returning true stops the loop", async () => {
+  const llm = scriptedLLM([
+    { text: "", toolCalls: [{ id: "1", name: "noop", arguments: "{}" }] as ToolCallResult[], usage: { input: 1, output: 1 } },
+  ]);
+  let calls = 0;
+  const out = await agent({
+    llm,
+    tools: [],
+    system: "s",
+    maxSteps: 5,
+    onStep: () => {
+      calls++;
+      return true;
+    },
+  });
+  assert.equal(calls, 1);
+  assert.equal(out, "");
+});
+
+test("malformed tool arguments surface as a readable failure", async () => {
+  const double = defineTool<{ n: number }>({
+    name: "double",
+    description: "double a number",
+    parameters: { type: "object", properties: { n: { type: "number" } } },
+    run: ({ n }) => n * 2,
+  });
+
+  const broken = await executeTool([double], "double", "{n: 21");
+  assert.equal(broken.ok, false);
+  assert.match(String(broken.result), /bad arguments/);
+  assert.match(String(broken.result), /not valid JSON/);
+
+  const wrongShape = await executeTool([double], "double", "[1,2]");
+  assert.equal(wrongShape.ok, false);
+  assert.match(String(wrongShape.result), /must be a JSON object, got an array/);
+
+  // An absent argument string is still a legitimate no-arg call.
+  const noArgs = await executeTool([double], "double", "");
+  assert.equal(noArgs.ok, true);
+});
+
 test("budget records cost and retry backs off", async () => {
   const b = new Budget({ inputCostPerM: 1, outputCostPerM: 2 });
   b.record({ input: 1_000_000, output: 500_000 });
