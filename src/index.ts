@@ -10,6 +10,7 @@ export {
 export type { LLM, LLMCallOptions, LLMReply, ChatMessage, ToolCallResult } from "./llm.ts";
 
 export { structured, extractJson } from "./structured.ts";
+export type { StructuredOptions, ParseSchema, Validator } from "./structured.ts";
 
 export { defineTool, executeTool, parseToolArguments, parseToolArgumentsResult, toolSchema } from "./tools.ts";
 export type { Tool, ToolArgumentsParse } from "./tools.ts";
