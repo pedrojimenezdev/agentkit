@@ -1,5 +1,13 @@
-export { createOpenAICompatible, createAnthropic } from "./llm.ts";
-export type { LLM, LLMReply, ChatMessage, ToolCallResult } from "./llm.ts";
+export {
+  createOpenAICompatible,
+  createAnthropic,
+  streamToString,
+  sseData,
+  openAIDeltas,
+  anthropicDeltas,
+  toAnthropicMessages,
+} from "./llm.ts";
+export type { LLM, LLMCallOptions, LLMReply, ChatMessage, ToolCallResult } from "./llm.ts";
 
 export { structured, extractJson } from "./structured.ts";
 

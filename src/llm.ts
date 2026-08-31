@@ -33,14 +33,96 @@ export interface LLMReply {
   usage?: { input: number; output: number };
 }
 
+export interface LLMCallOptions {
+  temperature?: number;
+  maxTokens?: number;
+  tools?: { name: string; description: string; parameters: unknown }[];
+  signal?: AbortSignal;
+}
+
 export interface LLM {
   /** Single completion against a message list. */
-  complete(messages: ChatMessage[], opts?: {
-    temperature?: number;
-    maxTokens?: number;
-    tools?: { name: string; description: string; parameters: unknown }[];
-    signal?: AbortSignal;
-  }): Promise<LLMReply>;
+  complete(messages: ChatMessage[], opts?: LLMCallOptions): Promise<LLMReply>;
+  /**
+   * Token-by-token text. Optional: a provider (or a test mock) that only does
+   * `complete` is still a valid LLM. Yields non-empty text deltas only — tool
+   * calls are not streamed, use `complete` when you need them.
+   */
+  stream?(messages: ChatMessage[], opts?: LLMCallOptions): AsyncIterable<string>;
+}
+
+/** Collect a stream into the single string it would have produced. */
+export async function streamToString(stream: AsyncIterable<string>): Promise<string> {
+  let out = "";
+  for await (const piece of stream) out += piece;
+  return out;
+}
+
+/** Read a fetch body as an async iterable of byte chunks. Explicit reader loop
+ *  rather than `for await (const c of body)` — not every runtime makes a
+ *  ReadableStream async-iterable. */
+async function* readBody(body: ReadableStream<Uint8Array>): AsyncGenerator<Uint8Array> {
+  const reader = body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      if (value) yield value;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+/**
+ * Decode a byte stream into SSE `data:` payloads. Network chunks split lines at
+ * arbitrary points, so the tail is buffered until a newline arrives — parsing
+ * per-chunk instead is the classic way to lose half a token.
+ */
+export async function* sseData(chunks: AsyncIterable<Uint8Array | string>): AsyncGenerator<string> {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for await (const chunk of chunks) {
+    buffer += typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
+    let nl: number;
+    while ((nl = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (line.startsWith("data:")) yield line.slice(5).trim();
+    }
+  }
+  const tail = buffer.trim();
+  if (tail.startsWith("data:")) yield tail.slice(5).trim();
+}
+
+function parseJson(payload: string): any {
+  try {
+    return JSON.parse(payload);
+  } catch {
+    return undefined;
+  }
+}
+
+/** OpenAI-compatible SSE → text deltas. Stops at `data: [DONE]`. */
+export async function* openAIDeltas(chunks: AsyncIterable<Uint8Array | string>): AsyncGenerator<string> {
+  for await (const payload of sseData(chunks)) {
+    if (payload === "[DONE]") return;
+    const text = parseJson(payload)?.choices?.[0]?.delta?.content;
+    if (typeof text === "string" && text.length > 0) yield text;
+  }
+}
+
+/** Anthropic SSE → text deltas: `content_block_delta` events carrying
+ *  `delta.text`. Stops at `message_stop`. */
+export async function* anthropicDeltas(chunks: AsyncIterable<Uint8Array | string>): AsyncGenerator<string> {
+  for await (const payload of sseData(chunks)) {
+    if (payload === "[DONE]") return;
+    const event = parseJson(payload);
+    if (event?.type === "message_stop") return;
+    if (event?.type !== "content_block_delta") continue;
+    const text = event.delta?.text;
+    if (typeof text === "string" && text.length > 0) yield text;
+  }
 }
 
 /** A fetch-based client for the OpenAI-compatible chat completions API
@@ -50,44 +132,53 @@ export function createOpenAICompatible(opts: {
   apiKey: string;
   model: string;
 }): LLM {
+  const endpoint = `${opts.baseUrl.replace(/\/+$/, "")}/chat/completions`;
+  const headers = { "content-type": "application/json", authorization: `Bearer ${opts.apiKey}` };
+
+  // Serialize into the OpenAI-compatible wire format: assistant messages
+  // carry `tool_calls`, tool messages carry `tool_call_id`. Dropping the
+  // ids is what makes real providers reject the turn.
+  const toWire = (messages: ChatMessage[]) =>
+    messages.map((m) => {
+      if (m.role === "assistant" && m.toolCalls?.length) {
+        return {
+          role: "assistant",
+          content: m.content || null,
+          tool_calls: m.toolCalls.map((tc) => ({
+            id: tc.id,
+            type: "function",
+            function: { name: tc.name, arguments: tc.arguments },
+          })),
+        };
+      }
+      if (m.role === "tool") {
+        return { role: "tool", tool_call_id: m.toolCallId ?? "", content: m.content };
+      }
+      return { role: m.role, content: m.content };
+    });
+
+  const buildBody = (messages: ChatMessage[], o?: LLMCallOptions) => {
+    const body: Record<string, unknown> = {
+      model: opts.model,
+      messages: toWire(messages),
+      temperature: o?.temperature ?? 0.2,
+      max_tokens: o?.maxTokens ?? 1024,
+    };
+    if (o?.tools?.length) {
+      body.tools = o.tools.map((t) => ({
+        type: "function",
+        function: { name: t.name, description: t.description, parameters: t.parameters },
+      }));
+    }
+    return body;
+  };
+
   return {
     async complete(messages, o) {
-      // Serialize into the OpenAI-compatible wire format: assistant messages
-      // carry `tool_calls`, tool messages carry `tool_call_id`. Dropping the
-      // ids is what makes real providers reject the turn.
-      const wire = messages.map((m) => {
-        if (m.role === "assistant" && m.toolCalls?.length) {
-          return {
-            role: "assistant",
-            content: m.content || null,
-            tool_calls: m.toolCalls.map((tc) => ({
-              id: tc.id,
-              type: "function",
-              function: { name: tc.name, arguments: tc.arguments },
-            })),
-          };
-        }
-        if (m.role === "tool") {
-          return { role: "tool", tool_call_id: m.toolCallId ?? "", content: m.content };
-        }
-        return { role: m.role, content: m.content };
-      });
-      const body: Record<string, unknown> = {
-        model: opts.model,
-        messages: wire,
-        temperature: o?.temperature ?? 0.2,
-        max_tokens: o?.maxTokens ?? 1024,
-      };
-      if (o?.tools?.length) {
-        body.tools = o.tools.map((t) => ({
-          type: "function",
-          function: { name: t.name, description: t.description, parameters: t.parameters },
-        }));
-      }
-      const res = await fetch(`${opts.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
+      const res = await fetch(endpoint, {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${opts.apiKey}` },
-        body: JSON.stringify(body),
+        headers,
+        body: JSON.stringify(buildBody(messages, o)),
         signal: o?.signal,
       });
       if (!res.ok) {
@@ -109,6 +200,20 @@ export function createOpenAICompatible(opts: {
           ? { input: data.usage.prompt_tokens, output: data.usage.completion_tokens }
           : undefined,
       };
+    },
+
+    async *stream(messages, o) {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { ...headers, accept: "text/event-stream" },
+        body: JSON.stringify({ ...buildBody(messages, o), stream: true }),
+        signal: o?.signal,
+      });
+      if (!res.ok) {
+        throw new Error(`LLM HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+      }
+      if (!res.body) throw new Error("LLM stream: response had no body");
+      yield* openAIDeltas(readBody(res.body));
     },
   };
 }
@@ -199,23 +304,34 @@ function anthropicToolCalls(content: AnthropicBlock[]): ToolCallResult[] | undef
 
 /** Fetch client for the Anthropic Messages API. */
 export function createAnthropic(opts: { apiKey: string; model: string }): LLM {
+  const endpoint = "https://api.anthropic.com/v1/messages";
+  const headers = {
+    "x-api-key": opts.apiKey,
+    "anthropic-version": "2023-06-01",
+    "content-type": "application/json",
+  };
+
+  const buildBody = (messages: ChatMessage[], o?: LLMCallOptions) => {
+    const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n");
+    const body: Record<string, unknown> = {
+      model: opts.model,
+      max_tokens: o?.maxTokens ?? 1024,
+      system: system || undefined,
+      messages: toAnthropicMessages(messages),
+    };
+    if (o?.temperature !== undefined) body.temperature = o.temperature;
+    if (o?.tools?.length) {
+      body.tools = o.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters }));
+    }
+    return body;
+  };
+
   return {
     async complete(messages, o) {
-      const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n");
-      const body: Record<string, unknown> = {
-        model: opts.model,
-        max_tokens: o?.maxTokens ?? 1024,
-        system: system || undefined,
-        messages: toAnthropicMessages(messages),
-      };
-      if (o?.temperature !== undefined) body.temperature = o.temperature;
-      if (o?.tools?.length) {
-        body.tools = o.tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters }));
-      }
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch(endpoint, {
         method: "POST",
-        headers: { "x-api-key": opts.apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-        body: JSON.stringify(body),
+        headers,
+        body: JSON.stringify(buildBody(messages, o)),
         signal: o?.signal,
       });
       if (!res.ok) {
@@ -233,6 +349,20 @@ export function createAnthropic(opts: { apiKey: string; model: string }): LLM {
           ? { input: data.usage.input_tokens, output: data.usage.output_tokens }
           : undefined,
       };
+    },
+
+    async *stream(messages, o) {
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { ...headers, accept: "text/event-stream" },
+        body: JSON.stringify({ ...buildBody(messages, o), stream: true }),
+        signal: o?.signal,
+      });
+      if (!res.ok) {
+        throw new Error(`Anthropic HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+      }
+      if (!res.body) throw new Error("Anthropic stream: response had no body");
+      yield* anthropicDeltas(readBody(res.body));
     },
   };
 }
