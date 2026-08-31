@@ -1,11 +1,27 @@
 import type { LLM, ChatMessage } from "./llm.ts";
 
-export interface StructuredOptions {
+/** The slice of a Zod schema this library actually uses. Structural typing
+ *  only — any object with a matching `safeParse` works, so Zod (or Valibot,
+ *  or a hand-rolled parser) stays out of the dependency list. */
+export interface ParseSchema<T> {
+  safeParse(value: unknown): { success: true; data: T } | { success: false; error: { message: string } };
+}
+
+export type Validator<T> = (value: unknown) => { ok: true; value: T } | { ok: false; error?: string };
+
+export interface StructuredOptions<T> {
+  messages: (system: string) => ChatMessage[];
+  system: string;
+  /**
+   * Predicate validator. Ignored when `schema` is also passed — `schema` wins,
+   * so the two never disagree about what shape is acceptable.
+   */
+  validate?: Validator<T>;
+  /** A Zod-compatible schema, used in preference to `validate` when both are given. */
+  schema?: ParseSchema<T>;
   /** Max attempts before giving up (default 2). */
   attempts?: number;
   temperature?: number;
-  /** Extra guidance appended to the system prompt. */
-  extra?: string;
   signal?: AbortSignal;
 }
 
@@ -27,26 +43,34 @@ export function extractJson(text: string): string {
   return text.trim();
 }
 
+/** Resolve the two ways of describing a valid shape into one predicate.
+ *  `schema` takes precedence over `validate` when both are supplied. */
+function toValidator<T>(opts: StructuredOptions<T>): Validator<T> {
+  const { schema } = opts;
+  if (schema) {
+    return (value: unknown) => {
+      const result = schema.safeParse(value);
+      return result.success
+        ? { ok: true, value: result.data }
+        : { ok: false, error: result.error?.message ?? "failed schema validation" };
+    };
+  }
+  if (opts.validate) return opts.validate;
+  throw new Error("structured(): pass either a `schema` or a `validate` function");
+}
+
 /**
  * Reliable structured output from an LLM. The hard part of production agents is
  * not the model — it's the model *sometimes* returning prose or a broken shape.
- * This wraps that: ask for JSON, validate against a zod-ish schema, and on a
- * miss re-ask once with the exact error so it can self-correct.
+ * This wraps that: ask for JSON, validate, and on a miss re-ask with the exact
+ * error so the model can self-correct.
  *
- * `validate` is a predicate + the schema name for the corrective message. Pass a
- * real zod or json-schema validator; the library stays dependency-free.
+ * Validation comes from either a `schema` (anything with Zod's `safeParse`) or a
+ * `validate` predicate. If both are passed, `schema` is used and `validate` is
+ * ignored. The library stays dependency-free either way.
  */
-export async function structured<T>(
-  llm: LLM,
-  opts: {
-    messages: (system: string) => ChatMessage[];
-    system: string;
-    validate: (value: unknown) => { ok: true; value: T } | { ok: false; error?: string };
-    attempts?: number;
-    temperature?: number;
-    signal?: AbortSignal;
-  },
-): Promise<T> {
+export async function structured<T>(llm: LLM, opts: StructuredOptions<T>): Promise<T> {
+  const validate = toValidator(opts);
   const attempts = opts.attempts ?? 2;
   let lastError = "";
   for (let i = 0; i < attempts; i++) {
@@ -68,7 +92,7 @@ export async function structured<T>(
       lastError = `not valid JSON (${(err as Error).message})`;
       continue;
     }
-    const check = opts.validate(parsed);
+    const check = validate(parsed);
     if (check.ok) return check.value;
     lastError = check.error ?? "failed validation";
   }

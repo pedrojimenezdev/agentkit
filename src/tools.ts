@@ -20,16 +20,33 @@ export function toolSchema(tool: Tool): { name: string; description: string; par
   return { name: tool.name, description: tool.description, parameters: tool.parameters };
 }
 
+export type ToolArgumentsParse =
+  | { ok: true; value: Record<string, unknown> }
+  | { ok: false; error: string };
+
+/** Parse the model's JSON-encoded arguments, reporting *why* a string failed.
+ *  The agent feeds that reason back to the model so it can correct the call
+ *  instead of silently re-running the tool against an empty object. */
+export function parseToolArgumentsResult(raw: string | undefined): ToolArgumentsParse {
+  if (raw === undefined || raw.trim() === "") return { ok: true, value: {} };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return { ok: false, error: `arguments are not valid JSON (${(err as Error).message})` };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    const got = parsed === null ? "null" : Array.isArray(parsed) ? "an array" : typeof parsed;
+    return { ok: false, error: `arguments must be a JSON object, got ${got}` };
+  }
+  return { ok: true, value: parsed as Record<string, unknown> };
+}
+
 /** Coerce the model's JSON-encoded arguments into an object. Never throws on a
  *  misshapen string — returns {} so the tool can decide. */
 export function parseToolArguments(raw: string | undefined): Record<string, unknown> {
-  if (!raw) return {};
-  try {
-    const v = JSON.parse(raw);
-    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
+  const parsed = parseToolArgumentsResult(raw);
+  return parsed.ok ? parsed.value : {};
 }
 
 /** Execute a tool by name; wraps errors so the agent sees a readable failure. */
@@ -40,9 +57,12 @@ export async function executeTool(
 ): Promise<{ ok: boolean; result: unknown }> {
   const tool = tools.find((t) => t.name === name);
   if (!tool) return { ok: false, result: `Unknown tool: ${name}` };
-  const args = parseToolArguments(rawArguments);
+  const parsed = parseToolArgumentsResult(rawArguments);
+  if (!parsed.ok) {
+    return { ok: false, result: `Tool ${name} received bad arguments: ${parsed.error}` };
+  }
   try {
-    return { ok: true, result: await tool.run(args as never) };
+    return { ok: true, result: await tool.run(parsed.value as never) };
   } catch (err) {
     return { ok: false, result: `Tool ${name} failed: ${(err as Error).message}` };
   }
