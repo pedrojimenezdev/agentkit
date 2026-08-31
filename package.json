@@ -19,6 +19,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "test": "node --test --experimental-strip-types 'test/**/*.test.ts'",
+    "test:compiled": "tsc -p tsconfig.test.json && node --test build-test/test/*.test.js",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [

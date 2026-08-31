@@ -28,6 +28,12 @@ First release under the `railguard` name.
   `parseToolArguments`, returning why a malformed argument string failed.
 - **CI.** GitHub Actions workflow running install, typecheck, test, and build
   across Node 20 and 22 on pushes to `main` and every pull request.
+- **`npm run test:compiled`** — the full suite compiled to JavaScript before it
+  runs, via a new `tsconfig.test.json`. `npm test` relies on Node's
+  `--experimental-strip-types`, which does not exist before Node 22.6, so the
+  suite could not run at all on the Node 20 the package claims to support. CI
+  runs the compiled suite on every matrix version and the native one only where
+  it is available.
 - **Tests** covering Anthropic message serialization, streaming, chunk overlap,
   tool-argument error surfacing, and the schema path through `structured()` —
   11 tests before this release, 34 after.

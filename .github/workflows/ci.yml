@@ -28,7 +28,15 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Test
+      # The full suite, compiled to JS first. This is the one that runs on every
+      # supported Node — `node --test` cannot strip TypeScript before 22.6.
+      - name: Test (compiled)
+        run: npm run test:compiled
+
+      # The fast path contributors use locally. Native type stripping needs
+      # Node 22.6+, so it is skipped on 20 rather than failing there.
+      - name: Test (native TypeScript)
+        if: matrix.node != '20'
         run: npm test
 
       - name: Build

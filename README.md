@@ -126,7 +126,22 @@ for await (const delta of llm.stream!([{ role: "user", content: "Write a haiku."
 npm i railguard
 ```
 
-Requires Node.js 20 or newer.
+Requires Node.js 20 or newer. The published package is compiled JavaScript over
+`fetch`, so Node 20 runs it fine.
+
+### Development
+
+```bash
+npm ci
+npm test            # native TypeScript execution — needs Node 22.6+
+npm run test:compiled   # same suite, compiled first — runs on Node 20
+npm run typecheck
+npm run build
+```
+
+`npm test` uses Node's `--experimental-strip-types`, which does not exist before
+Node 22.6. On Node 20, use `npm run test:compiled`; CI runs it on every version
+in the matrix so the suite is genuinely verified against the oldest supported Node.
 
 ## License
 
