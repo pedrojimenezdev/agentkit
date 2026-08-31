@@ -1,10 +1,18 @@
 {
-  "name": "agentkit",
+  "name": "railguard",
   "version": "0.1.0",
-  "description": "Production-hardened AI agent toolkit — agent loop, reliable structured output, typed tool calling, pluggable RAG retrieval, and cost guardrails.",
+  "description": "The agent loop that can't run away with your bill — budget guardrails, reliable structured output, typed tool calling, tenant-safe RAG. Zero runtime deps.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pedrojimenezdev/railguard.git"
+  },
+  "homepage": "https://github.com/pedrojimenezdev/railguard",
+  "bugs": {
+    "url": "https://github.com/pedrojimenezdev/railguard/issues"
+  },
   "files": [
     "dist"
   ],

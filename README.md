@@ -1,4 +1,4 @@
-# agentkit
+# railguard
 
 > Production-hardened AI agent toolkit, extracted from real client work — an agent loop that can't run away with your bill, reliable JSON from models that love prose, typed tool calling, tenant-safe RAG, and cost guardrails. **Zero runtime dependencies.**
 
@@ -38,7 +38,7 @@ npm run build            # emits dist/ with .d.ts
 **Reliable structured output** (the model is told JSON, then *held to it*):
 
 ```ts
-import { structured } from "agentkit";
+import { structured } from "railguard";
 
 const user = await structured<{ name: string }>(llm, {
   system: "Extract the user's name.",
@@ -56,7 +56,7 @@ const user = await structured<{ name: string }>(llm, {
 **A tool-calling agent with a budget**:
 
 ```ts
-import { agent, defineTool, Budget } from "agentkit";
+import { agent, defineTool, Budget } from "railguard";
 
 const search = defineTool<{ q: string }>({
   name: "search",
@@ -77,7 +77,7 @@ const answer = await agent({
 **Tenant-safe RAG**:
 
 ```ts
-import { chunk, inMemoryStore, retrieve, groundPrompt } from "agentkit";
+import { chunk, inMemoryStore, retrieve, groundPrompt } from "railguard";
 
 const store = inMemoryStore();
 for (const piece of chunk(docs)) {
