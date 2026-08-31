@@ -1,24 +1,79 @@
 # railguard
 
-> Production-hardened AI agent toolkit, extracted from real client work — an agent loop that can't run away with your bill, reliable JSON from models that love prose, typed tool calling, tenant-safe RAG, and cost guardrails. **Zero runtime dependencies.**
+> **The agent loop that can't run away with your bill.**
 
-This is the distilled core of what made real systems work in production: the multi-tenant dental-copilot agent (RAG + tool calling over WhatsApp) and a social-publishing bot that turned one prompt into per-platform copy and images. The client-specific parts stay private; the reusable engineering is here.
+[![npm](https://img.shields.io/npm/v/railguard.svg)](https://www.npmjs.com/package/railguard)
+[![CI](https://github.com/pedrojimenezdev/railguard/actions/workflows/ci.yml/badge.svg)](https://github.com/pedrojimenezdev/railguard/actions/workflows/ci.yml)
+[![license](https://img.shields.io/npm/l/railguard.svg)](LICENSE)
 
-## Why this exists
+Production-hardened AI agent toolkit extracted from real client work.
+Zero runtime dependencies — `fetch` + Node.js built-ins only.
 
-Frameworks make the demo easy. The hard part of production agents is everything else:
+## The problem
 
-- **The model sometimes returns prose or a broken shape** when you asked for JSON → `structured()` re-asks with the exact error until it's valid.
-- **A runaway tool loop is a bill** → `Budget` is a hard ceiling checked *before* every model call.
-- **Tenants must never see each other's documents** → retrieval is scoped by tenant key, not by filtering afterwards.
-- **Providers come and go** → one `LLM` interface, swap Anthropic/DeepSeek/OpenAI/mocks in a line.
+Frameworks make the demo easy; production is where agents actually break. A model
+that loops on a tool call turns into a four-figure invoice overnight, and a
+`maxSteps` cap alone won't catch it because cost is tokens, not iterations —
+`Budget` is a hard ceiling checked *before* every call, so the worst case is
+bounded by construction. Ask for JSON and you'll get prose, a markdown fence, or
+a field of the wrong type; `structured()` strips the wrapping, validates against
+your schema, and re-asks with the exact error until it parses or gives up loudly.
+Multi-tenant retrieval leaks the moment isolation is a `.filter()` someone forgets,
+so `VectorStore.search(scope, …)` never sees another tenant's chunks in the first
+place. And provider lock-in is a rewrite you pay for later — one `LLM` interface
+covers Anthropic, DeepSeek, OpenAI, anything OpenAI-compatible, and your test mocks.
 
-## Install / run
+## Quickstart
 
-```bash
-npm i                    # typescript only (dev)
-npm test                 # node:test — 11 tests, no network, mocked LLM
-npm run build            # emits dist/ with .d.ts
+```ts
+import { createOpenAICompatible, agent, defineTool, Budget } from "railguard";
+
+const llm = createOpenAICompatible({
+  baseUrl: "https://api.deepseek.com", // or OpenRouter, vLLM, OpenAI…
+  apiKey: process.env.DEEPSEEK_API_KEY!,
+  model: "deepseek-chat",
+});
+
+const multiply = defineTool<{ a: number; b: number }>({
+  name: "multiply",
+  description: "Multiply two numbers and return the product.",
+  parameters: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } } },
+  run: ({ a, b }) => a * b,
+});
+
+const answer = await agent({
+  llm,
+  tools: [multiply],
+  system: "Use the multiply tool for arithmetic. Answer in one short sentence.",
+  maxSteps: 6,
+  budget: new Budget({ maxTokens: 4000, maxCostUsd: 0.2 }),
+});
+console.log(answer); // → "6 times 7 is 42."
+```
+
+Structured output with any Zod-compatible schema (Zod itself stays out of your
+dependency tree — `railguard` only needs `safeParse`):
+
+```ts
+import { structured } from "railguard";
+import { z } from "zod";
+
+const profile = await structured(llm, {
+  system: "Extract the person's name and what they are building.",
+  messages: (s) => [
+    { role: "system", content: s },
+    { role: "user", content: "I'm Ana and I'm building a booking site for villas." },
+  ],
+  schema: z.object({ name: z.string(), project: z.string() }),
+});
+```
+
+Streaming, when you want tokens as they arrive:
+
+```ts
+for await (const delta of llm.stream!([{ role: "user", content: "Write a haiku." }])) {
+  process.stdout.write(delta);
+}
 ```
 
 ## Modules
@@ -32,71 +87,46 @@ npm run build            # emits dist/ with .d.ts
 | `Budget` / `retry` | Token + cost ceilings, exponential backoff with jitter |
 | `env` / `redact` | Type-safe env parsing with secret-stripping and redaction |
 | `createOpenAICompatible` / `createAnthropic` | fetch-based providers — no SDK dependency |
+| `stream()` / `streamToString` | SSE streaming for both providers, parsed with `fetch` + `ReadableStream` |
 
-## Examples
+## vs LangChain
 
-**Reliable structured output** (the model is told JSON, then *held to it*):
+- **Less magic.** No chains, no runnables, no callback manager. `agent()` is a
+  `for` loop you can read in one sitting — when it misbehaves you debug your own
+  code, not a framework's abstraction stack.
+- **Hard guarantees over breadth.** LangChain integrates with far more than this
+  does. What it doesn't give you is a cost ceiling that throws *before* the call,
+  or retrieval where tenant isolation is structural rather than a filter.
+- **Nothing to install.** Zero runtime dependencies against a tree of hundreds —
+  which matters most when you're the one auditing it for a client.
 
-```ts
-import { structured } from "railguard";
+## vs the raw SDK
 
-const user = await structured<{ name: string }>(llm, {
-  system: "Extract the user's name.",
-  messages: (system) => [
-    { role: "system", content: system },
-    { role: "user", content: "My name is Ana." },
-  ],
-  validate: (v) =>
-    v && typeof v === "object" && typeof (v as any).name === "string"
-      ? { ok: true, value: v as { name: string } }
-      : { ok: false, error: "missing 'name'" },
-});
+- **The SDK gives you one call; production needs the loop around it.** Tool
+  dispatch, argument parsing that survives a malformed model response, retries,
+  budget accounting — you will write all of it. This is that, already tested.
+- **Provider-portable by default.** The same `agent()` and `structured()` run
+  against Anthropic, DeepSeek, or a mock. Swapping is one line, not a migration.
+- **Still just `fetch` underneath.** No SDK to pin, no version skew, no vendored
+  transport. Drop to the raw API whenever you want — nothing here hides it.
+
+## Design principles
+
+- **Zero runtime deps** — `fetch` + `node:test`. TypeScript is the only dev dependency.
+- **Strings in, validation out** — model-supplied JSON is never trusted; a malformed
+  tool call surfaces as a readable error the model can correct.
+- **Hard ceilings, not soft** — `Budget.check()` throws *before* the next call, so
+  the worst case is bounded by construction.
+- **Isolation by scope, not filter** — `VectorStore.search(scope, …)` never sees
+  another tenant's chunks.
+
+## Install
+
+```bash
+npm i railguard
 ```
 
-**A tool-calling agent with a budget**:
-
-```ts
-import { agent, defineTool, Budget } from "railguard";
-
-const search = defineTool<{ q: string }>({
-  name: "search",
-  description: "Search the knowledge base",
-  parameters: { type: "object", properties: { q: { type: "string" } } },
-  run: ({ q }) => lookUp(q),
-});
-
-const answer = await agent({
-  llm,
-  tools: [search],
-  system: "Answer using the search tool when needed.",
-  maxSteps: 8,
-  budget: new Budget({ maxTokens: 4000, maxCostUsd: 0.5 }),
-});
-```
-
-**Tenant-safe RAG**:
-
-```ts
-import { chunk, inMemoryStore, retrieve, groundPrompt } from "railguard";
-
-const store = inMemoryStore();
-for (const piece of chunk(docs)) {
-  await store.add({ id: nanoid(), scope: tenantId, embedding: await embed(piece), text: piece });
-}
-const hits = await retrieve({ store, embedder: { embed }, scope: tenantId }, question);
-const prompt = groundPrompt(hits, question);
-```
-
-## Design decisions
-
-- **Zero runtime deps** — `fetch` + `node:test`. The only dev dep is TypeScript.
-- **Strings in, validation out** — model-supplied JSON is never trusted (`parseToolArguments` coerces, tools validate).
-- **Hard ceilings, not soft** — `Budget.check()` throws *before* the next call, so the worst case is bounded by construction.
-- **Isolation by scope, not filter** — `VectorStore.search(scope, …)` never sees other tenants' chunks.
-
-## Status
-
-Extracted from production systems; the client-specific integrations (Telegram, WhatsApp, Zernio, Qdrant plugins) live in the private repos. This library is the reusable, tested core — use it, fork it, port the interesting parts.
+Requires Node.js 20 or newer.
 
 ## License
 
